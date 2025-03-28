@@ -1,8 +1,8 @@
 CC = gcc
-CFLAGS = -Wall -O2 -pg
+CFLAGS = -Wall -O2 -pg -Isrc
 EXE = build/nn.exe
-SRC = nn.c
-OBJ = build/nn.o
+SRC = main.c neural_net.c utils.c mnist.c
+OBJ = $(patsubst %.c,build/%.o,$(SRC))
 GMON_OUT = build/gmon.out
 
 all: $(EXE) run
@@ -13,8 +13,8 @@ $(EXE): build $(OBJ)
 build:
 	mkdir -p build
 
-build/nn.o: $(SRC) | build
-	$(CC) $(CFLAGS) -c $(SRC) -o $(OBJ)
+build/%.o: %.c | build
+	$(CC) $(CFLAGS) -c $< -o $@
 
 run: $(EXE)
 	./$(EXE)
