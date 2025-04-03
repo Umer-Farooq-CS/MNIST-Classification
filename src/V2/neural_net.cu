@@ -12,35 +12,41 @@ NeuralNetwork* createNetwork() {
         exit(1);
     }
     
+    // Allocate host memory
     net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
     net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
     net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
     net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
 
-    if (!net->b1 || !net->b2) {
-        if (VERBOSE) printf("Failed to allocate biases\n");
-        exit(1);
-    }
-
+    // Initialize weights
     srand(time(NULL));
-    if (VERBOSE) printf("Initializing weights...\n");
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        for (int j = 0; j < INPUT_SIZE; j++)
-            net->W1[i][j] = ((double)rand() / RAND_MAX) * 0.01;
-
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-            net->W2[i][j] = ((double)rand() / RAND_MAX) * 0.01;
-
-    if (VERBOSE) {
-        printf("Weight initialization complete\n");
-        printf("W1[0][0]: %.6f\n", net->W1[0][0]);
-        printf("W2[0][0]: %.6f\n", net->W2[0][0]);
-        printf("b1[0]: %.6f\n", net->b1[0]);
-        printf("b2[0]: %.6f\n", net->b2[0]);
+    for (int i = 0; i < HIDDEN_SIZE; i++) {
+        for (int j = 0; j < INPUT_SIZE; j++) {
+            net->W1[i * INPUT_SIZE + j] = ((double)rand() / RAND_MAX) * 0.01;
+        }
     }
-    
-    if (VERBOSE) printf("Neural network created successfully\n");
+
+    for (int i = 0; i < OUTPUT_SIZE; i++) {
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
+            net->W2[i * HIDDEN_SIZE + j] = ((double)rand() / RAND_MAX) * 0.01;
+        }
+    }
+
+    // Allocate device memory
+    cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+    cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
+    cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(double));
+    cudaMalloc(&net->d_b2, OUTPUT_SIZE * sizeof(double));
+    cudaMalloc(&net->d_input, INPUT_SIZE * sizeof(double));
+    cudaMalloc(&net->d_hidden, HIDDEN_SIZE * sizeof(double));
+    cudaMalloc(&net->d_output, OUTPUT_SIZE * sizeof(double));
+
+    // Copy initial values to device
+    cudaMemcpy(net->d_W1, net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(net->d_W2, net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(net->d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(net->d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+
     return net;
 }
 
@@ -53,7 +59,7 @@ void forward(NeuralNetwork* net, double* input, double* hidden, double* output) 
     for (int i = 0; i < HIDDEN_SIZE; i++) {
         hidden[i] = net->b1[i];
         for (int j = 0; j < INPUT_SIZE; j++)
-            hidden[i] += net->W1[i][j] * input[j];
+            hidden[i] += net->W1[i*INPUT_SIZE + j] * input[j];
     }
     
     if (VERBOSE) {
@@ -75,7 +81,7 @@ void forward(NeuralNetwork* net, double* input, double* hidden, double* output) 
     for (int i = 0; i < OUTPUT_SIZE; i++) {
         output[i] = net->b2[i];
         for (int j = 0; j < HIDDEN_SIZE; j++)
-            output[i] += net->W2[i][j] * hidden[j];
+            output[i] += net->W2[i*HIDDEN_SIZE + j] * hidden[j];
     }
     
     if (VERBOSE) {
@@ -115,7 +121,7 @@ void backward(NeuralNetwork* net, double* input, double* hidden, double* output,
     for (int i = 0; i < HIDDEN_SIZE; i++) {
         d_hidden[i] = 0;
         for (int j = 0; j < OUTPUT_SIZE; j++)
-            d_hidden[i] += net->W2[j][i] * d_output[j];
+            d_hidden[i] += net->W2[j*HIDDEN_SIZE + i] * d_output[j];
         d_hidden[i] *= (hidden[i] > 0);
     }
     
@@ -129,11 +135,11 @@ void backward(NeuralNetwork* net, double* input, double* hidden, double* output,
     if (VERBOSE) printf("Updating weights...\n");
     for (int i = 0; i < OUTPUT_SIZE; i++)
         for (int j = 0; j < HIDDEN_SIZE; j++)
-            net->W2[i][j] -= LEARNING_RATE * d_output[i] * hidden[j];
+            net->W2[i*HIDDEN_SIZE + j] -= LEARNING_RATE * d_output[i] * hidden[j];
 
     for (int i = 0; i < HIDDEN_SIZE; i++)
         for (int j = 0; j < INPUT_SIZE; j++)
-            net->W1[i][j] -= LEARNING_RATE * d_hidden[i] * input[j];
+            net->W1[i*INPUT_SIZE + j] -= LEARNING_RATE * d_hidden[i] * input[j];
 
     // Update biases
     if (VERBOSE) printf("Updating biases...\n");
@@ -144,8 +150,8 @@ void backward(NeuralNetwork* net, double* input, double* hidden, double* output,
         net->b1[i] -= LEARNING_RATE * d_hidden[i];
     
     if (VERBOSE) {
-        printf("Updated W2[0][0]: %.6f\n", net->W2[0][0]);
-        printf("Updated W1[0][0]: %.6f\n", net->W1[0][0]);
+        printf("Updated W2[0][0]: %.6f\n", net->W2[0]);
+        printf("Updated W1[0][0]: %.6f\n", net->W1[0]);
         printf("Updated b2[0]: %.6f\n", net->b2[0]);
         printf("Updated b1[0]: %.6f\n", net->b1[0]);
         printf("Backward pass completed\n");
@@ -153,7 +159,7 @@ void backward(NeuralNetwork* net, double* input, double* hidden, double* output,
 }
 
 // Train network
-void train(NeuralNetwork* net, double** images, double** labels, int numImages) {
+void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
     if (VERBOSE) printf("\nStarting training...\n");
     
     cudaEvent_t total_start, total_stop;
@@ -174,15 +180,15 @@ void train(NeuralNetwork* net, double** images, double** labels, int numImages) 
             if (VERBOSE && i % 1000 == 0) printf("Processing sample %d\n", i);
             
             double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-            forward(net, images[i], hidden, output);
-            backward(net, images[i], hidden, output, labels[i]);
+            forward(net, &images[i*INPUT_SIZE], hidden, output);
+            backward(net, &images[i*INPUT_SIZE], hidden, output, &labels[i*OUTPUT_SIZE]);
 
             // Compute loss & accuracy
-            for (int k = 0; k < OUTPUT_SIZE; k++) loss -= labels[i][k] * log(output[k]);
+            for (int k = 0; k < OUTPUT_SIZE; k++) loss -= labels[i*OUTPUT_SIZE + k] * log(output[k]);
             int pred = 0, actual = 0;
             for (int j = 0; j < OUTPUT_SIZE; j++) {
                 if (output[j] > output[pred]) pred = j;
-                if (labels[i][j] > labels[i][actual]) actual = j;
+                if (labels[i*OUTPUT_SIZE + j] > labels[i*OUTPUT_SIZE + actual]) actual = j;
             }
             if (pred == actual) correct++;
         }
@@ -198,7 +204,7 @@ void train(NeuralNetwork* net, double** images, double** labels, int numImages) 
 }
 
 // Evaluate accuracy on test data
-void evaluate(NeuralNetwork* net, double** images, double** labels, int numImages) {
+void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
     if (VERBOSE) printf("\nStarting evaluation...\n");
     int correct = 0;
     
@@ -206,12 +212,12 @@ void evaluate(NeuralNetwork* net, double** images, double** labels, int numImage
         if (VERBOSE && i % 1000 == 0) printf("Evaluating sample %d\n", i);
         
         double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-        forward(net, images[i], hidden, output);
+        forward(net, &images[i*INPUT_SIZE], hidden, output);
         
         int pred = 0, actual = 0;
         for (int j = 0; j < OUTPUT_SIZE; j++) {
             if (output[j] > output[pred]) pred = j;
-            if (labels[i][j] > labels[i][actual]) actual = j;
+            if (labels[i*OUTPUT_SIZE + j] > labels[i*OUTPUT_SIZE + actual]) actual = j;
         }
         if (pred == actual) correct++;
         
@@ -230,10 +236,22 @@ void evaluate(NeuralNetwork* net, double** images, double** labels, int numImage
 // Free network memory
 void freeNetwork(NeuralNetwork* net) {
     if (VERBOSE) printf("Freeing neural network...\n");
-    freeMatrix(net->W1, HIDDEN_SIZE);
-    freeMatrix(net->W2, OUTPUT_SIZE);
+    
+    // Free host memory
+    free(net->W1);
+    free(net->W2);
     free(net->b1);
     free(net->b2);
+    
+    // Free device memory
+    cudaFree(net->d_W1);
+    cudaFree(net->d_W2);
+    cudaFree(net->d_b1);
+    cudaFree(net->d_b2);
+    cudaFree(net->d_input);
+    cudaFree(net->d_hidden);
+    cudaFree(net->d_output);
+    
     free(net);
     if (VERBOSE) printf("Neural network freed\n");
 }

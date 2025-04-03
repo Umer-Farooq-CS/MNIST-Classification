@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 // Read MNIST dataset
-double** loadMNISTImages(const char* filename, int numImages) {
+double* loadMNISTImages(const char* filename, int numImages) {
     if (VERBOSE) printf("Loading MNIST images from %s...\n", filename);
     FILE* file = fopen(filename, "rb");
     if (!file) {
@@ -12,7 +12,7 @@ double** loadMNISTImages(const char* filename, int numImages) {
         exit(1);
     }
     fseek(file, 16, SEEK_SET);
-    double** images = allocateMatrix(numImages, INPUT_SIZE);
+    double* images = allocateMatrix(numImages, INPUT_SIZE);
     for (int i = 0; i < numImages; i++) {
         for (int j = 0; j < INPUT_SIZE; j++) {
             unsigned char pixel;
@@ -23,21 +23,21 @@ double** loadMNISTImages(const char* filename, int numImages) {
                 exit(EXIT_FAILURE);
             }
 
-            images[i][j] = pixel / 255.0;
+            images[i*INPUT_SIZE + j] = pixel / 255.0;
         }
         if (VERBOSE && i % 10000 == 0) printf("Loaded %d images\n", i);
     }
     fclose(file);
     
     if (VERBOSE) {
-        printf("First pixel of first image: %.4f\n", images[0][0]);
-        printf("Last pixel of first image: %.4f\n", images[0][INPUT_SIZE-1]);
+        printf("First pixel of first image: %.4f\n", images[0]);
+        printf("Last pixel of first image: %.4f\n", images[INPUT_SIZE-1]);
         printf("Image loading complete\n");
     }
     return images;
 }
 
-double** loadMNISTLabels(const char* filename, int numLabels) {
+double* loadMNISTLabels(const char* filename, int numLabels) {
     if (VERBOSE) printf("Loading MNIST labels from %s...\n", filename);
     FILE* file = fopen(filename, "rb");
     if (!file) {
@@ -45,7 +45,7 @@ double** loadMNISTLabels(const char* filename, int numLabels) {
         exit(1);
     }
     fseek(file, 8, SEEK_SET);
-    double** labels = allocateMatrix(numLabels, OUTPUT_SIZE);
+    double* labels = allocateMatrix(numLabels, OUTPUT_SIZE);
     for (int i = 0; i < numLabels; i++) {
         unsigned char label;
         if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
@@ -55,7 +55,7 @@ double** loadMNISTLabels(const char* filename, int numLabels) {
         }
 
         for (int j = 0; j < OUTPUT_SIZE; j++) {
-            labels[i][j] = (j == label) ? 1.0 : 0.0;
+            labels[i*OUTPUT_SIZE + j] = (j == label) ? 1.0 : 0.0;
         }
         
         if (VERBOSE && i % 10000 == 0) printf("Loaded %d labels\n", i);
@@ -64,7 +64,7 @@ double** loadMNISTLabels(const char* filename, int numLabels) {
     
     if (VERBOSE) {
         printf("First label: ");
-        for (int j = 0; j < OUTPUT_SIZE; j++) printf("%.1f ", labels[0][j]);
+        for (int j = 0; j < OUTPUT_SIZE; j++) printf("%.1f ", labels[j]);
         printf("\n");
         printf("Label loading complete\n");
     }
