@@ -50,6 +50,28 @@ NeuralNetwork* createNetwork() {
     return net;
 }
 
+__global__ void computeHiddenLayer(double* d_input, double* d_W1, double* d_b1, double* d_hidden, int input_size, int hidden_size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < hidden_size) {
+        double sum = d_b1[i];
+        for (int j = 0; j < input_size; j++) {
+            sum += d_W1[i * input_size + j] * d_input[j];
+        }
+        d_hidden[i] = sum; // Pre-activation
+    }
+}
+
+__global__ void computeOutputLayer(double* d_hidden, double* d_W2, double* d_b2, double* d_output, int hidden_size, int output_size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < output_size) {
+        double sum = d_b2[i];
+        for (int j = 0; j < hidden_size; j++) {
+            sum += d_W2[i * hidden_size + j] * d_hidden[j];
+        }
+        d_output[i] = sum; // Pre-activation
+    }
+}
+
 // Forward pass
 void forward(NeuralNetwork* net, double* input, double* hidden, double* output) {
     if (VERBOSE) printf("\nStarting forward pass...\n");
