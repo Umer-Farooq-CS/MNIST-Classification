@@ -4,6 +4,14 @@
 #include "nn.h"
 #include <cuda_runtime.h>
 
+// CUDA error checking
+inline void checkCudaError(cudaError_t err, const char* context) {
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA error in %s: %s\n", context, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+}
+
 // Timer functions using CUDA events
 void create_timer(cudaEvent_t* start, cudaEvent_t* stop);
 void start_timer(cudaEvent_t start);

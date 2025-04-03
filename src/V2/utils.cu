@@ -1,8 +1,6 @@
 #include "utils.h"
 #include <stdlib.h>
 
-// Implementation of utility functions
-
 // Implementation of CUDA event timer functions
 void create_timer(cudaEvent_t* start, cudaEvent_t* stop) {
     cudaEventCreate(start);
