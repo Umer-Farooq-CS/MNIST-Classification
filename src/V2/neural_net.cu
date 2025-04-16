@@ -227,6 +227,51 @@ void freeNetwork(NeuralNetwork* net) {
     if (VERBOSE) printf("Neural network freed\n");
 }
 
+void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
+    if (VERBOSE) printf("\nEvaluating network...\n");
+
+    int correct = 0;
+
+    // Allocate memory for output
+    double* output = (double*)malloc(OUTPUT_SIZE * sizeof(double));
+
+    for (int i = 0; i < numImages; i++) {
+        double* image = images + i * INPUT_SIZE;
+        double* label = labels + i * OUTPUT_SIZE;
+
+        // Run forward pass
+        forwardGPU(net, image, output);
+
+        // Find predicted and actual labels
+        int predicted = 0;
+        int actual = 0;
+        double max_output = output[0];
+        for (int j = 1; j < OUTPUT_SIZE; j++) {
+            if (output[j] > max_output) {
+                max_output = output[j];
+                predicted = j;
+            }
+        }
+
+        for (int j = 0; j < OUTPUT_SIZE; j++) {
+            if (label[j] == 1.0) {
+                actual = j;
+                break;
+            }
+        }
+
+        if (predicted == actual) {
+            correct++;
+        }
+    }
+
+    double accuracy = 100.0 * correct / numImages;
+    printf("Evaluation Accuracy: %.2f%% (%d / %d)\n", accuracy, correct, numImages);
+
+    free(output);
+}
+
+
 void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
     if (VERBOSE) printf("\nStarting training...\n");
     
