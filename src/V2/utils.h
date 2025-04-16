@@ -4,6 +4,14 @@
 #include "nn.h"
 #include <cuda_runtime.h>
 
+// CUDA error checking
+inline void checkCudaError(cudaError_t err, const char* context) {
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA error in %s: %s\n", context, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+}
+
 #define CHECK_BOUNDS(index, max) \
     if (index >= max) { \
         printf("Index %d out of bounds (max %d)\n", index, max); \
