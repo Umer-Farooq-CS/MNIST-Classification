@@ -21,18 +21,22 @@ typedef struct {
     double* d_input;   // [INPUT_SIZE]
     double* d_hidden;  // [HIDDEN_SIZE]
     double* d_output;  // [OUTPUT_SIZE]
+    
+    // Additional buffers for training
+    double* d_d_output;  // Output gradients [OUTPUT_SIZE]
+    double* d_d_hidden;  // Hidden gradients [HIDDEN_SIZE]
 } NeuralNetwork;
 
 // Neural network functions
 NeuralNetwork* createNetwork();
 void freeNetwork(NeuralNetwork* net);
-void forward(NeuralNetwork* net, double* input, double* hidden, double* output);
-void backward(NeuralNetwork* net, double* input, double* hidden, double* output, double* target);
+void forwardGPU(NeuralNetwork* net, double* input, double* output);
+void backwardGPU(NeuralNetwork* net, double* input, double* target);
 void train(NeuralNetwork* net, double* images, double* labels, int numImages);
 void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages);
 
 // Activation functions
-void relu(double* x, int size);
-void softmax(double* x, int size);
+__global__ void reluKernel(double* x, int size);
+__global__ void softmaxKernel(double* x, int size);
 
 #endif
