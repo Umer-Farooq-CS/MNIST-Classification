@@ -1,5 +1,5 @@
 CC = nvcc
-FLAGS = -O3 -Xcompiler -Wall,-Wextra,-ffast-math,-funroll-loops -pg
+FLAGS = -O3 -Xcompiler -Wall,-Wextra,-ffast-math,-funroll-loops -pg --expt-relaxed-constexpr --expt-extended-lambda
 NVFLAGS = -gencode arch=compute_61,code=sm_61 \
           -gencode arch=compute_70,code=sm_70 \
           -gencode arch=compute_75,code=sm_75 \

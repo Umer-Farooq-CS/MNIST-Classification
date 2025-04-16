@@ -22,11 +22,11 @@ float stop_timer(cudaEvent_t start, cudaEvent_t stop) {
 }
 
 // Allocate memory for a matrix
-double* allocateMatrix(int rows, int cols) {
+float* allocateMatrix(int rows, int cols) {
     if (VERBOSE) printf("Allocating flattened matrix of size %d x %d\n", rows, cols);
     
     // Allocate single contiguous block
-    double* mat = (double*)malloc(rows * cols * sizeof(double));
+    float* mat = (float*)malloc(rows * cols * sizeof(float));
     if (!mat) {
         if (VERBOSE) printf("Failed to allocate matrix\n");
         exit(1);
@@ -37,7 +37,7 @@ double* allocateMatrix(int rows, int cols) {
 }
 
 // Free allocated matrix memory
-void freeMatrix(double* mat, int rows) {
+void freeMatrix(float* mat, int rows) {
     if (VERBOSE) printf("Freeing matrix with %d rows\n", rows);
     free(mat);
     if (VERBOSE) printf("Matrix freed successfully\n");

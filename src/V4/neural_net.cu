@@ -1,15 +1,71 @@
 #include "neural_net.h"
-#include "utils.h"
+#include <cublas_v2.h>
 
-// initialize an array of weights using CURAND directly on the GPU.
-__global__ void initWeightsKernel(double* W, int n, double scale, unsigned long seed) {
+// Initialize weights in FP16
+__global__ void initWeightsFP16(half* W, int n, float scale) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        // Initialize a CURAND state using a unique seed per thread.
-        curandState state;
-        curand_init(seed, idx, 0, &state);
-        // Set the weight to a uniform random number in [0,1) scaled by 'scale'
-        W[idx] = curand_uniform_double(&state) * scale;
+        W[idx] = __float2half(scale * (curand_uniform(&state) - 0.5f));
+    }
+}
+
+// WMMA matrix multiplication kernel
+__global__ void wmma_matmul(half* A, half* B, float* C, int M, int N, int K) {
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, nvcuda::wmma::row_major> a_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, nvcuda::wmma::col_major> b_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
+
+    // Load, multiply, and store
+    nvcuda::wmma::load_matrix_sync(a_frag, A, K);
+    nvcuda::wmma::load_matrix_sync(b_frag, B, K);
+    nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+    nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+    nvcuda::wmma::store_matrix_sync(C, c_frag, N, nvcuda::wmma::mem_row_major);
+}
+
+// Batched forward pass using Tensor Cores
+void forward_batch(NeuralNetwork* net, half* d_input_batch, int batch_size) {
+    dim3 gridDim(HIDDEN_SIZE / WMMA_M, batch_size);
+    dim3 blockDim(WMMA_M, WMMA_N);
+
+    // Layer 1: Input (FP16) -> Hidden (FP32)
+    wmma_matmul<<<gridDim, blockDim>>>(net->d_W1, d_input_batch, net->d_hidden, 
+                                      HIDDEN_SIZE, batch_size, INPUT_SIZE);
+    
+    // Launch ReLU kernel (we assume it is memory‐bound so shared memory is not needed here).
+    int numBlocks = (HIDDEN_SIZE + blockSize - 1) / blockSize;
+    relu_kernel<<<numBlocks, blockSize, 0, stream>>>(net->d_hidden, HIDDEN_SIZE);
+    checkCudaError(cudaGetLastError(), "Kernel launch: relu_kernel");
+
+    // For the output layer, use the same optimized kernel.
+    int numBlocksOutput = OUTPUT_SIZE;  // one block per output neuron.
+    matrixVectorMultiplySM<<<numBlocksOutput, blockSize, sharedSize, stream>>>(
+        net->d_W2, net->d_hidden, net->d_b2, net->d_output, OUTPUT_SIZE, HIDDEN_SIZE);
+    checkCudaError(cudaGetLastError(), "Kernel launch: matrixVectorMultiplySM (output)");
+
+    // Launch optimized softmax kernel.
+    // Assume one block is sufficient if OUTPUT_SIZE is small.
+    softmaxKernelOpt<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(float), stream>>>(net->d_output, OUTPUT_SIZE);
+    checkCudaError(cudaGetLastError(), "Kernel launch: softmaxKernelOpt");
+
+    // Copy results back to host asynchronously.
+    checkCudaError(cudaMemcpyAsync(hidden, net->d_hidden, HIDDEN_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream),
+                   "cudaMemcpyAsync hidden");
+    checkCudaError(cudaMemcpyAsync(output, net->d_output, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream),
+                   "cudaMemcpyAsync output");
+
+    // Wait for stream to complete.
+    checkCudaError(cudaStreamSynchronize(stream), "cudaStreamSynchronize forward");
+    checkCudaError(cudaStreamDestroy(stream), "cudaStreamDestroy forward");
+
+    if (VERBOSE) {
+        printf("Post-ReLU hidden (first 5): ");
+        for (int i = 0; i < 5; i++) printf("%.4f ", hidden[i]);
+        printf("\n");
+        printf("Post-softmax output: ");
+        for (int i = 0; i < OUTPUT_SIZE; i++) printf("%.4f ", output[i]);
+        printf("\n");
+        printf("Forward pass completed\n");
     }
 }
 
@@ -23,23 +79,23 @@ NeuralNetwork* createNetwork() {
     }
     
     // Allocate pinned host arrays for backup or later use.
-    checkCudaError(cudaMallocHost((void**)&net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)), "cudaMallocHost W1");
-    checkCudaError(cudaMallocHost((void**)&net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)), "cudaMallocHost W2");
-    checkCudaError(cudaMallocHost((void**)&net->b1, HIDDEN_SIZE * sizeof(double)), "cudaMallocHost b1");
-    checkCudaError(cudaMallocHost((void**)&net->b2, OUTPUT_SIZE * sizeof(double)), "cudaMallocHost b2");
+    checkCudaError(cudaMallocHost((void**)&net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float)), "cudaMallocHost W1");
+    checkCudaError(cudaMallocHost((void**)&net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float)), "cudaMallocHost W2");
+    checkCudaError(cudaMallocHost((void**)&net->b1, HIDDEN_SIZE * sizeof(float)), "cudaMallocHost b1");
+    checkCudaError(cudaMallocHost((void**)&net->b2, OUTPUT_SIZE * sizeof(float)), "cudaMallocHost b2");
     
     // Initialize host arrays to zero for biases.
-    memset(net->b1, 0, HIDDEN_SIZE * sizeof(double));
-    memset(net->b2, 0, OUTPUT_SIZE * sizeof(double));
+    memset(net->b1, 0, HIDDEN_SIZE * sizeof(float));
+    memset(net->b2, 0, OUTPUT_SIZE * sizeof(float));
 
     // Allocate device memory for weights and biases.
-    checkCudaError(cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)), "cudaMalloc d_W1");
-    checkCudaError(cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_W2");
-    checkCudaError(cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_b1");
-    checkCudaError(cudaMalloc(&net->d_b2, OUTPUT_SIZE * sizeof(double)), "cudaMalloc d_b2");
-    checkCudaError(cudaMalloc(&net->d_input, INPUT_SIZE * sizeof(double)), "cudaMalloc d_input");
-    checkCudaError(cudaMalloc(&net->d_hidden, HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_hidden");
-    checkCudaError(cudaMalloc(&net->d_output, OUTPUT_SIZE * sizeof(double)), "cudaMalloc d_output");
+    checkCudaError(cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float)), "cudaMalloc d_W1");
+    checkCudaError(cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float)), "cudaMalloc d_W2");
+    checkCudaError(cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(float)), "cudaMalloc d_b1");
+    checkCudaError(cudaMalloc(&net->d_b2, OUTPUT_SIZE * sizeof(float)), "cudaMalloc d_b2");
+    checkCudaError(cudaMalloc(&net->d_input, INPUT_SIZE * sizeof(float)), "cudaMalloc d_input");
+    checkCudaError(cudaMalloc(&net->d_hidden, HIDDEN_SIZE * sizeof(float)), "cudaMalloc d_hidden");
+    checkCudaError(cudaMalloc(&net->d_output, OUTPUT_SIZE * sizeof(float)), "cudaMalloc d_output");
     
     // Initialize weights directly on the GPU using the new kernel.
     int totalW1 = HIDDEN_SIZE * INPUT_SIZE;
@@ -54,14 +110,14 @@ NeuralNetwork* createNetwork() {
     checkCudaError(cudaGetLastError(), "Kernel launch: initWeightsKernel d_W2");
 
     // Initialize biases to zero directly on the GPU.
-    checkCudaError(cudaMemset(net->d_b1, 0, HIDDEN_SIZE * sizeof(double)), "cudaMemset d_b1");
-    checkCudaError(cudaMemset(net->d_b2, 0, OUTPUT_SIZE * sizeof(double)), "cudaMemset d_b2");
+    checkCudaError(cudaMemset(net->d_b1, 0, HIDDEN_SIZE * sizeof(float)), "cudaMemset d_b1");
+    checkCudaError(cudaMemset(net->d_b2, 0, OUTPUT_SIZE * sizeof(float)), "cudaMemset d_b2");
 
     // Optionally copy the initialized device values to pinned host arrays (e.g., for debugging).
-    checkCudaError(cudaMemcpy(net->W1, net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy W1");
-    checkCudaError(cudaMemcpy(net->W2, net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy W2");
-    checkCudaError(cudaMemcpy(net->b1, net->d_b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy b1");
-    checkCudaError(cudaMemcpy(net->b2, net->d_b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy b2");
+    checkCudaError(cudaMemcpy(net->W1, net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost), "cudaMemcpy W1");
+    checkCudaError(cudaMemcpy(net->W2, net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float), cudaMemcpyDeviceToHost), "cudaMemcpy W2");
+    checkCudaError(cudaMemcpy(net->b1, net->d_b1, HIDDEN_SIZE * sizeof(float), cudaMemcpyDeviceToHost), "cudaMemcpy b1");
+    checkCudaError(cudaMemcpy(net->b2, net->d_b2, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost), "cudaMemcpy b2");
 
     if (VERBOSE) {
         printf("Weight initialization complete\n");
@@ -78,7 +134,7 @@ NeuralNetwork* createNetwork() {
 
 
 // ReLU activation kernel
-__global__ void relu_kernel(double* x, int size) {
+__global__ void relu_kernel(float* x, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         x[idx] = (x[idx] > 0) ? x[idx] : 0;
@@ -86,9 +142,9 @@ __global__ void relu_kernel(double* x, int size) {
 }
 
 // Softmax activation kernel
-__global__ void softmax_kernel(double* x, int size) {
-    __shared__ double sum;
-    double val = 0;
+__global__ void softmax_kernel(float* x, int size) {
+    __shared__ float sum;
+    float val = 0;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (idx < size) {
@@ -108,7 +164,7 @@ __global__ void softmax_kernel(double* x, int size) {
     }
 }
 
-void backward(NeuralNetwork* net, double* d_input, double* d_target) {
+void backward(NeuralNetwork* net, float* d_input, float* d_target) {
     if (VERBOSE) printf("\nStarting GPU backward pass...\n");
 
     int blockSize = 256;
@@ -123,13 +179,13 @@ void backward(NeuralNetwork* net, double* d_input, double* d_target) {
     checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize after computeDOutputKernel");
     
     // Step 2: Save the forward hidden activations.
-    double* d_hidden_forward;
-    checkCudaError(cudaMalloc(&d_hidden_forward, HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_hidden_forward");
-    checkCudaError(cudaMemcpy(d_hidden_forward, net->d_hidden, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToDevice), "cudaMemcpy d_hidden_forward");
+    float* d_hidden_forward;
+    checkCudaError(cudaMalloc(&d_hidden_forward, HIDDEN_SIZE * sizeof(float)), "cudaMalloc d_hidden_forward");
+    checkCudaError(cudaMemcpy(d_hidden_forward, net->d_hidden, HIDDEN_SIZE * sizeof(float), cudaMemcpyDeviceToDevice), "cudaMemcpy d_hidden_forward");
     
     // Allocate a temporary device array for the hidden gradients.
-    double* d_hidden_grad;
-    checkCudaError(cudaMalloc(&d_hidden_grad, HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_hidden_grad");
+    float* d_hidden_grad;
+    checkCudaError(cudaMalloc(&d_hidden_grad, HIDDEN_SIZE * sizeof(float)), "cudaMalloc d_hidden_grad");
     
     // Step 3: Compute hidden layer gradients.
     computeDHiddenKernel<<<numBlocksHidden, blockSize>>>(net->d_W2, net->d_output, d_hidden_forward, d_hidden_grad, HIDDEN_SIZE, OUTPUT_SIZE);
@@ -162,88 +218,19 @@ void backward(NeuralNetwork* net, double* d_input, double* d_target) {
     if (VERBOSE) printf("GPU backward pass completed\n");
 }
 
-
-// Backpropagation on host
-void backward(NeuralNetwork* net, double* input, double* hidden, double* output, double* target) {
-    if (VERBOSE) printf("\nStarting backward pass...\n");
-    double d_output[OUTPUT_SIZE], d_hidden[HIDDEN_SIZE];
-
-    // Compute output layer gradient.
-    if (VERBOSE) printf("Computing output gradients...\n");
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        d_output[i] = output[i] - target[i];
-    
-    if (VERBOSE) {
-        printf("Output gradients: ");
-        for (int i = 0; i < OUTPUT_SIZE; i++) printf("%.4f ", d_output[i]);
-        printf("\n");
-    }
-
-    // Compute hidden layer gradient.
-    if (VERBOSE) printf("Computing hidden gradients...\n");
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        d_hidden[i] = 0;
-        for (int j = 0; j < OUTPUT_SIZE; j++)
-            d_hidden[i] += net->W2[j * HIDDEN_SIZE + i] * d_output[j];
-        d_hidden[i] *= (hidden[i] > 0);
-    }
-    
-    if (VERBOSE) {
-        printf("Hidden gradients (first 5): ");
-        for (int i = 0; i < 5; i++) printf("%.4f ", d_hidden[i]);
-        printf("\n");
-    }
-
-    // Update weights (gradient descent).
-    if (VERBOSE) printf("Updating weights...\n");
-    for (int i = 0; i < OUTPUT_SIZE; i++) {
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            net->W2[i * HIDDEN_SIZE + j] -= LEARNING_RATE * d_output[i] * hidden[j];
-        }
-    }
-
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        for (int j = 0; j < INPUT_SIZE; j++) {
-            net->W1[i * INPUT_SIZE + j] -= LEARNING_RATE * d_hidden[i] * input[j];
-        }
-    }
-
-    // Update biases.
-    if (VERBOSE) printf("Updating biases...\n");
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        net->b2[i] -= LEARNING_RATE * d_output[i];
-
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        net->b1[i] -= LEARNING_RATE * d_hidden[i];
-    
-    // Update device weights.
-    checkCudaError(cudaMemcpy(net->d_W1, net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy update d_W1");
-    checkCudaError(cudaMemcpy(net->d_W2, net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy update d_W2");
-    checkCudaError(cudaMemcpy(net->d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy update d_b1");
-    checkCudaError(cudaMemcpy(net->d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy update d_b2");
-    
-    if (VERBOSE) {
-        printf("Updated W2[0][0]: %.6f\n", net->W2[0]);
-        printf("Updated W1[0][0]: %.6f\n", net->W1[0]);
-        printf("Updated b2[0]: %.6f\n", net->b2[0]);
-        printf("Updated b1[0]: %.6f\n", net->b1[0]);
-        printf("Backward pass completed\n");
-    }
-}
-
 // ----------------------------------------------------------------------------
 // Optimized kernel for matrix–vector multiplication using shared memory reduction.
 // Each block handles one output row. Each thread in the block computes a partial sum 
 // over a subset of columns.
-__global__ void matrixVectorMultiplySM(const double* __restrict__ W, 
-                                         const double* __restrict__ x, 
-                                         const double* __restrict__ b, 
-                                         double* __restrict__ y, 
+__global__ void matrixVectorMultiplySM(const float* __restrict__ W, 
+                                         const float* __restrict__ x, 
+                                         const float* __restrict__ b, 
+                                         float* __restrict__ y, 
                                          int rows, int cols) {
-    extern __shared__ double sdata[];
+    extern __shared__ float sdata[];
     int row = blockIdx.x;  // each block does one row.
     int tid = threadIdx.x;
-    double sum = 0.0;
+    float sum = 0.0;
     // Each thread sums over columns strided by blockDim.x.
     for (int j = tid; j < cols; j += blockDim.x) {
         sum += W[row * cols + j] * x[j];
@@ -267,14 +254,14 @@ __global__ void matrixVectorMultiplySM(const double* __restrict__ W,
 // Optimized softmax kernel using shared memory reduction for the sum.
 // This version first computes the maximum value (for numerical stability),
 // then computes exponentials and reduces them.
-__global__ void softmaxKernelOpt(double* x, int size) {
-    extern __shared__ double sdata[];
+__global__ void softmaxKernelOpt(float* x, int size) {
+    extern __shared__ float sdata[];
     int tid = threadIdx.x;
     // Use the first block (assume one block launched for the vector)
     // First, find max value using parallel reduction.
-    double max_val = -1e20;
+    float max_val = -1e20;
     for (int i = tid; i < size; i += blockDim.x) {
-        double tmp = x[i];
+        float tmp = x[i];
         if (tmp > max_val) max_val = tmp;
     }
     sdata[tid] = max_val;
@@ -287,9 +274,9 @@ __global__ void softmaxKernelOpt(double* x, int size) {
     }
     max_val = sdata[0];
     // Now compute exponentials (using max_val for stability)
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < size; i += blockDim.x) {
-        double exp_val = exp(x[i] - max_val);
+        float exp_val = exp(x[i] - max_val);
         x[i] = exp_val;  // store exponentials temporarily
         sum += exp_val;
     }
@@ -301,73 +288,15 @@ __global__ void softmaxKernelOpt(double* x, int size) {
             sdata[tid] += sdata[tid+s];
         __syncthreads();
     }
-    double total = sdata[0];
+    float total = sdata[0];
     // Finally normalize.
     for (int i = tid; i < size; i += blockDim.x) {
         x[i] /= total;
     }
 }
 
-// ----------------------------------------------------------------------------
-// Forward pass function rewritten to use asynchronous copies and a stream.
-void forward(NeuralNetwork* net, double* input, double* hidden, double* output) {
-    if (VERBOSE) printf("\nStarting forward pass...\n");
-    
-    cudaStream_t stream;
-    checkCudaError(cudaStreamCreate(&stream), "cudaStreamCreate");
-
-    // Asynchronously copy input to device.
-    checkCudaError(cudaMemcpyAsync(net->d_input, input, INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice, stream),
-                   "cudaMemcpyAsync input");
-
-    int blockSize = BLOCK_SIZE;
-    int numBlocksHidden = HIDDEN_SIZE;  // one block per row in hidden layer.
-    size_t sharedSize = blockSize * sizeof(double);
-    
-    // Launch optimized matrix-vector multiplication for hidden layer.
-    matrixVectorMultiplySM<<<numBlocksHidden, blockSize, sharedSize, stream>>>(
-        net->d_W1, net->d_input, net->d_b1, net->d_hidden, HIDDEN_SIZE, INPUT_SIZE);
-    checkCudaError(cudaGetLastError(), "Kernel launch: matrixVectorMultiplySM (hidden)");
-
-    // Launch ReLU kernel (we assume it is memory‐bound so shared memory is not needed here).
-    int numBlocks = (HIDDEN_SIZE + blockSize - 1) / blockSize;
-    relu_kernel<<<numBlocks, blockSize, 0, stream>>>(net->d_hidden, HIDDEN_SIZE);
-    checkCudaError(cudaGetLastError(), "Kernel launch: relu_kernel");
-
-    // For the output layer, use the same optimized kernel.
-    int numBlocksOutput = OUTPUT_SIZE;  // one block per output neuron.
-    matrixVectorMultiplySM<<<numBlocksOutput, blockSize, sharedSize, stream>>>(
-        net->d_W2, net->d_hidden, net->d_b2, net->d_output, OUTPUT_SIZE, HIDDEN_SIZE);
-    checkCudaError(cudaGetLastError(), "Kernel launch: matrixVectorMultiplySM (output)");
-
-    // Launch optimized softmax kernel.
-    // Assume one block is sufficient if OUTPUT_SIZE is small.
-    softmaxKernelOpt<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(double), stream>>>(net->d_output, OUTPUT_SIZE);
-    checkCudaError(cudaGetLastError(), "Kernel launch: softmaxKernelOpt");
-
-    // Copy results back to host asynchronously.
-    checkCudaError(cudaMemcpyAsync(hidden, net->d_hidden, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost, stream),
-                   "cudaMemcpyAsync hidden");
-    checkCudaError(cudaMemcpyAsync(output, net->d_output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost, stream),
-                   "cudaMemcpyAsync output");
-
-    // Wait for stream to complete.
-    checkCudaError(cudaStreamSynchronize(stream), "cudaStreamSynchronize forward");
-    checkCudaError(cudaStreamDestroy(stream), "cudaStreamDestroy forward");
-
-    if (VERBOSE) {
-        printf("Post-ReLU hidden (first 5): ");
-        for (int i = 0; i < 5; i++) printf("%.4f ", hidden[i]);
-        printf("\n");
-        printf("Post-softmax output: ");
-        for (int i = 0; i < OUTPUT_SIZE; i++) printf("%.4f ", output[i]);
-        printf("\n");
-        printf("Forward pass completed\n");
-    }
-}
-
 // Kernel to compute d_output = d_output - d_target, for the output layer gradients.
-__global__ void computeDOutputKernel(double* d_output, const double* d_target, int outputSize) {
+__global__ void computeDOutputKernel(float* d_output, const float* d_target, int outputSize) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i < outputSize) {
         d_output[i] = d_output[i] - d_target[i];
@@ -377,12 +306,12 @@ __global__ void computeDOutputKernel(double* d_output, const double* d_target, i
 // Kernel to compute d_hidden_grad for each hidden neuron.
 // Uses the layer-2 weights and the computed d_output.
 // The forward activation (before replacing with gradients) is in d_hidden_forward.
-__global__ void computeDHiddenKernel(const double* d_W2, const double* d_output, 
-                                       const double* d_hidden_forward, double* d_hidden_grad,
+__global__ void computeDHiddenKernel(const float* d_W2, const float* d_output, 
+                                       const float* d_hidden_forward, float* d_hidden_grad,
                                        int hiddenSize, int outputSize) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < hiddenSize) {
-        double sum = 0.0;
+        float sum = 0.0;
         for (int j = 0; j < outputSize; j++) {
             sum += d_W2[j * hiddenSize + i] * d_output[j];
         }
@@ -393,9 +322,9 @@ __global__ void computeDHiddenKernel(const double* d_W2, const double* d_output,
 
 // Kernel to update the weights for the output layer (W2).
 // Uses the computed output gradients and the forward hidden activations.
-__global__ void updateW2Kernel(double* d_W2, const double* d_output, 
-                               const double* d_hidden_forward, int hiddenSize, 
-                               int outputSize, double learning_rate) {
+__global__ void updateW2Kernel(float* d_W2, const float* d_output, 
+                               const float* d_hidden_forward, int hiddenSize, 
+                               int outputSize, float learning_rate) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = outputSize * hiddenSize;
     if (idx < total) {
@@ -407,9 +336,9 @@ __global__ void updateW2Kernel(double* d_W2, const double* d_output,
 
 // Kernel to update the weights for the hidden layer (W1).
 // Uses the computed hidden gradients and the input.
-__global__ void updateW1Kernel(double* d_W1, const double* d_hidden_grad, 
-                               const double* d_input, int inputSize, int hiddenSize, 
-                               double learning_rate) {
+__global__ void updateW1Kernel(float* d_W1, const float* d_hidden_grad, 
+                               const float* d_input, int inputSize, int hiddenSize, 
+                               float learning_rate) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = hiddenSize * inputSize;
     if (idx < total) {
@@ -420,7 +349,7 @@ __global__ void updateW1Kernel(double* d_W1, const double* d_hidden_grad,
 }
 
 // Kernel to update biases, used for both layers.
-__global__ void updateBiasesKernel(double* d_bias, const double* d_grad, int size, double learning_rate) {
+__global__ void updateBiasesKernel(float* d_bias, const float* d_grad, int size, float learning_rate) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size) {
         d_bias[i] -= learning_rate * d_grad[i];
@@ -431,7 +360,7 @@ __global__ void updateBiasesKernel(double* d_bias, const double* d_grad, int siz
 // We now show an example of using asynchronous streams in the training loop.
 // Instead of processing one sample at a time strictly sequentially, we use multiple streams.
 // In a real system you would batch many samples together.
-void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
+void train(NeuralNetwork* net, float* images, float* labels, int numImages) {
     if (VERBOSE) printf("\nStarting training...\n");
 
     cudaEvent_t total_start, total_stop;
@@ -450,7 +379,7 @@ void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
         create_timer(&epoch_start, &epoch_stop);
         start_timer(epoch_start);
 
-        double loss = 0.0;
+        float loss = 0.0;
         int correct = 0;
 
         if (VERBOSE) printf("\nEpoch %d/%d\n", epoch+1, EPOCHS);
@@ -460,12 +389,12 @@ void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
             int streamId = i % numStreams;
             
             // Allocate device memory for target and copy asynchronously using the stream.
-            double* d_target;
-            checkCudaError(cudaMalloc(&d_target, OUTPUT_SIZE * sizeof(double)), "cudaMalloc d_target in train");
-            checkCudaError(cudaMemcpyAsync(d_target, &labels[i * OUTPUT_SIZE], OUTPUT_SIZE * sizeof(double), 
+            float* d_target;
+            checkCudaError(cudaMalloc(&d_target, OUTPUT_SIZE * sizeof(float)), "cudaMalloc d_target in train");
+            checkCudaError(cudaMemcpyAsync(d_target, &labels[i * OUTPUT_SIZE], OUTPUT_SIZE * sizeof(float), 
                                              cudaMemcpyHostToDevice, streams[streamId]), "cudaMemcpyAsync d_target in train");
 
-            double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+            float hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
             // Launch forward pass on the chosen stream.
             // (For simplicity, here we call forward which creates its own stream.
             // In a real implementation you would modify forward to accept a stream parameter.)
@@ -489,7 +418,7 @@ void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
         }
 
         printf("Epoch %d - Loss: %.4f - Train Accuracy: %.2f%% - Time: %.3fs\n",
-               epoch + 1, loss / numImages, (correct / (double)numImages) * 100, 
+               epoch + 1, loss / numImages, (correct / (float)numImages) * 100, 
                stop_timer(epoch_start, epoch_stop));
     }
 
@@ -508,12 +437,12 @@ void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
 // asynchronous copies in evaluate if desired.
 // ----------------------------------------------------------------------------
 
-void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
+void evaluate(NeuralNetwork* net, float* images, float* labels, int numImages) {
     if (VERBOSE) printf("\nStarting evaluation...\n");
     int correct = 0;
     
     for (int i = 0; i < numImages; i++) {
-        double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+        float hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
         forward(net, &images[i * INPUT_SIZE], hidden, output);
         
         int pred = 0, actual = 0;
@@ -531,7 +460,7 @@ void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages)
         }
     }
     
-    printf("Test Accuracy: %.2f%%\n", (correct / (double)numImages) * 100);
+    printf("Test Accuracy: %.2f%%\n", (correct / (float)numImages) * 100);
     if (VERBOSE) printf("Evaluation completed\n");
 }
 

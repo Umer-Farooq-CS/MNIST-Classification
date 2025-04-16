@@ -1,66 +1,72 @@
 #ifndef NEURAL_NET_H
 #define NEURAL_NET_H
 
-#include "nn.h"   // This file must define HIDDEN_SIZE, INPUT_SIZE, OUTPUT_SIZE, LEARNING_RATE, EPOCHS, etc.
-#include <stdlib.h>
-#include <time.h>
-#include <curand_kernel.h>
+#include "nn.h"
+#include <cublas_v2.h>
+#include <cuda_fp16.h>
 
-// Define a block size for shared memory kernels.
 #define BLOCK_SIZE 128
+#define WMMA_M 16
+#define WMMA_N 16
+#define WMMA_K 16
 
-// Structure holding host and device copies of weights and biases.
 typedef struct {
-    double* W1;  // Flattened weight matrix for layer 1 [HIDDEN_SIZE x INPUT_SIZE]
-    double* W2;  // Flattened weight matrix for layer 2 [OUTPUT_SIZE x HIDDEN_SIZE]
-    double* b1;  // Biases for layer 1 [HIDDEN_SIZE]
-    double* b2;  // Biases for layer 2 [OUTPUT_SIZE]
-    // Device (GPU) copies.
-    double* d_W1;
-    double* d_W2;
-    double* d_b1;
-    double* d_b2;
-    double* d_input;
-    double* d_hidden;
-    double* d_output;
+    half* W1;   // FP16 weights
+    half* W2;
+    float* b1;  // FP32 biases
+    float* b2;
+    // Device copies
+    half* d_W1;
+    half* d_W2;
+    float* d_b1;
+    float* d_b2;
+    half* d_input;  // FP16 input
+    float* d_hidden;
+    float* d_output;
 } NeuralNetwork;
+
+// Tensor Core-optimized forward pass
+void forward_batch(NeuralNetwork* net, half* d_input_batch, int batch_size);
+
+// WMMA matrix multiplication kernel
+__global__ void wmma_matmul(half* A, half* B, float* C, int M, int N, int K);
 
 // Neural network functions
 NeuralNetwork* createNetwork();
 void freeNetwork(NeuralNetwork* net);
-void forward(NeuralNetwork* net, double* input, double* hidden, double* output);
+void forward(NeuralNetwork* net, float* input, float* hidden, float* output);
 // GPU backward pass: note that here the "input" and "target" are expected to be device pointers.
-void backward(NeuralNetwork* net, double* d_input, double* d_target);
-void train(NeuralNetwork* net, double* images, double* labels, int numImages);
-void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages);
+void backward(NeuralNetwork* net, float* d_input, float* d_target);
+void train(NeuralNetwork* net, float* images, float* labels, int numImages);
+void evaluate(NeuralNetwork* net, float* images, float* labels, int numImages);
 
 // CUDA kernel declarations.
 
 // Optimized matrix–vector multiplication kernel that uses shared memory to perform in–block reduction.
 // Each block computes one output row.
-__global__ void matrixVectorMultiplySM(const double* __restrict__ W, 
-                                         const double* __restrict__ x, 
-                                         const double* __restrict__ b, 
-                                         double* __restrict__ y, 
+__global__ void matrixVectorMultiplySM(const float* __restrict__ W, 
+                                         const float* __restrict__ x, 
+                                         const float* __restrict__ b, 
+                                         float* __restrict__ y, 
                                          int rows, int cols);
 
 // ReLU activation kernel (unchanged).
-__global__ void relu_kernel(double* x, int size);
+__global__ void relu_kernel(float* x, int size);
 
 // Optimized softmax kernel using shared memory for reduction and numerical stability.
-__global__ void softmaxKernelOpt(double* x, int size);
+__global__ void softmaxKernelOpt(float* x, int size);
 
 // Kernels used in the GPU backward pass.
-__global__ void computeDOutputKernel(double* d_output, const double* d_target, int outputSize);
-__global__ void computeDHiddenKernel(const double* d_W2, const double* d_output, 
-                                       const double* d_hidden_forward, double* d_hidden_grad,
+__global__ void computeDOutputKernel(float* d_output, const float* d_target, int outputSize);
+__global__ void computeDHiddenKernel(const float* d_W2, const float* d_output, 
+                                       const float* d_hidden_forward, float* d_hidden_grad,
                                        int hiddenSize, int outputSize);
-__global__ void updateW2Kernel(double* d_W2, const double* d_output, 
-                               const double* d_hidden_forward, int hiddenSize, 
-                               int outputSize, double learning_rate);
-__global__ void updateW1Kernel(double* d_W1, const double* d_hidden_grad, 
-                               const double* d_input, int inputSize, int hiddenSize, 
-                               double learning_rate);
-__global__ void updateBiasesKernel(double* d_bias, const double* d_grad, int size, double learning_rate);
+__global__ void updateW2Kernel(float* d_W2, const float* d_output, 
+                               const float* d_hidden_forward, int hiddenSize, 
+                               int outputSize, float learning_rate);
+__global__ void updateW1Kernel(float* d_W1, const float* d_hidden_grad, 
+                               const float* d_input, int inputSize, int hiddenSize, 
+                               float learning_rate);
+__global__ void updateBiasesKernel(float* d_bias, const float* d_grad, int size, float learning_rate);
 
 #endif
