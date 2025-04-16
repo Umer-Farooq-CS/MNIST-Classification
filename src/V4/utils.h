@@ -24,7 +24,7 @@ void start_timer(cudaEvent_t start);
 float stop_timer(cudaEvent_t start, cudaEvent_t stop);
 
 // Matrix operations
-double* allocateMatrix(int rows, int cols);
-void freeMatrix(double* mat, int rows);
+float* allocateMatrix(int rows, int cols);
+void freeMatrix(float* mat, int rows);
 
 #endif
