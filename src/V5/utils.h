@@ -14,9 +14,6 @@
     // Remove CUDA-specific functions
     // Keep matrix operations
     
-    
-
-
     double* allocateMatrix(int rows, int cols);
     void freeMatrix(double* mat, int rows);
     
