@@ -35,14 +35,12 @@ build/%.prof.o: %.cu | build
 run: $(EXE)
 	./$(EXE)
 	mv gmon.out $(GMON_OUT) 2>/dev/null || true
-	
+
 prof-run: $(PROF_EXE)
 	./$(PROF_EXE)
 	mv gmon.out $(GMON_OUT) 2>/dev/null || true
 
-clean:
-	rm -rf build
-
+# 🔧 GPROF REPORTING
 prof: prof-run
 	@echo "Generating profiling report..."
 	gprof $(PROF_EXE) $(GMON_OUT) > $(PROF_DIR)/gprof_analysis.txt
@@ -51,4 +49,17 @@ prof: prof-run
 	@echo "  - $(PROF_DIR)/gprof_analysis.txt"
 	@echo "  - $(PROF_DIR)/gprof_graph.png"
 
-.PHONY: all run prof-run clean prof
+# 🔍 Nsight Systems Profiling
+nsys-prof: $(EXE)
+	nsys profile --stats=true --output=$(PROF_DIR)/nsys_report ./$(EXE)
+	@echo "Nsight Systems profiling report saved to $(PROF_DIR)/nsys_report.qdrep"
+
+# 🔍 Nsight Compute Profiling
+ncu-prof: $(EXE)
+	nv-nsight-cu-cli --kernel-name-base demangled ./$(EXE) > $(PROF_DIR)/ncu_report.txt
+	@echo "Nsight Compute CLI report saved to $(PROF_DIR)/ncu_report.txt"
+
+clean:
+	rm -rf build
+
+.PHONY: all run prof-run clean prof nsys-prof ncu-prof
