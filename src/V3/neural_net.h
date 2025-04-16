@@ -2,9 +2,12 @@
 #define NEURAL_NET_H
 
 #include "nn.h"   // This file must define HIDDEN_SIZE, INPUT_SIZE, OUTPUT_SIZE, LEARNING_RATE, EPOCHS, etc.
+#include <stdlib.h>
+#include <time.h>
+#include <curand_kernel.h>
 
 // Define a block size for shared memory kernels.
-#define BLOCK_SIZE 256
+#define BLOCK_SIZE 128
 
 // Structure holding host and device copies of weights and biases.
 typedef struct {

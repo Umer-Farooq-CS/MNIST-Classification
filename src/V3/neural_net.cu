@@ -1,9 +1,19 @@
 #include "neural_net.h"
 #include "utils.h"
-#include <stdlib.h>
-#include <time.h>
-#define BLOCK_SIZE 256
 
+// initialize an array of weights using CURAND directly on the GPU.
+__global__ void initWeightsKernel(double* W, int n, double scale, unsigned long seed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // Initialize a CURAND state using a unique seed per thread.
+        curandState state;
+        curand_init(seed, idx, 0, &state);
+        // Set the weight to a uniform random number in [0,1) scaled by 'scale'
+        W[idx] = curand_uniform_double(&state) * scale;
+    }
+}
+
+// Modified createNetwork() that initializes weights directly on the GPU.
 NeuralNetwork* createNetwork() {
     if (VERBOSE) printf("Creating neural network...\n");
     NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
@@ -12,35 +22,17 @@ NeuralNetwork* createNetwork() {
         exit(1);
     }
     
-    // Allocate flattened matrices
-    net->W1 = (double*)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
-    net->W2 = (double*)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
-    net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
-    net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
-
-    if (!net->W1 || !net->W2 || !net->b1 || !net->b2) {
-        if (VERBOSE) printf("Failed to allocate weights/biases\n");
-        exit(1);
-    }
-
-    srand(time(NULL));
-    if (VERBOSE) printf("Initializing weights...\n");
+    // Allocate pinned host arrays for backup or later use.
+    checkCudaError(cudaMallocHost((void**)&net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)), "cudaMallocHost W1");
+    checkCudaError(cudaMallocHost((void**)&net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)), "cudaMallocHost W2");
+    checkCudaError(cudaMallocHost((void**)&net->b1, HIDDEN_SIZE * sizeof(double)), "cudaMallocHost b1");
+    checkCudaError(cudaMallocHost((void**)&net->b2, OUTPUT_SIZE * sizeof(double)), "cudaMallocHost b2");
     
-    // Initialize W1 (flattened)
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        for (int j = 0; j < INPUT_SIZE; j++) {
-            net->W1[i * INPUT_SIZE + j] = ((double)rand() / RAND_MAX) * 0.01;
-        }
-    }
+    // Initialize host arrays to zero for biases.
+    memset(net->b1, 0, HIDDEN_SIZE * sizeof(double));
+    memset(net->b2, 0, OUTPUT_SIZE * sizeof(double));
 
-    // Initialize W2 (flattened)
-    for (int i = 0; i < OUTPUT_SIZE; i++) {
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            net->W2[i * HIDDEN_SIZE + j] = ((double)rand() / RAND_MAX) * 0.01;
-        }
-    }
-
-    // Allocate and copy device memory
+    // Allocate device memory for weights and biases.
     checkCudaError(cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)), "cudaMalloc d_W1");
     checkCudaError(cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_W2");
     checkCudaError(cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_b1");
@@ -48,17 +40,33 @@ NeuralNetwork* createNetwork() {
     checkCudaError(cudaMalloc(&net->d_input, INPUT_SIZE * sizeof(double)), "cudaMalloc d_input");
     checkCudaError(cudaMalloc(&net->d_hidden, HIDDEN_SIZE * sizeof(double)), "cudaMalloc d_hidden");
     checkCudaError(cudaMalloc(&net->d_output, OUTPUT_SIZE * sizeof(double)), "cudaMalloc d_output");
+    
+    // Initialize weights directly on the GPU using the new kernel.
+    int totalW1 = HIDDEN_SIZE * INPUT_SIZE;
+    int totalW2 = OUTPUT_SIZE * HIDDEN_SIZE;
+    int threads = BLOCK_SIZE;
+    int blocksW1 = (totalW1 + threads - 1) / threads;
+    int blocksW2 = (totalW2 + threads - 1) / threads;
+    unsigned long seed = (unsigned long) time(NULL);
+    initWeightsKernel<<<blocksW1, threads>>>(net->d_W1, totalW1, 0.01, seed);
+    checkCudaError(cudaGetLastError(), "Kernel launch: initWeightsKernel d_W1");
+    initWeightsKernel<<<blocksW2, threads>>>(net->d_W2, totalW2, 0.01, seed + 1);
+    checkCudaError(cudaGetLastError(), "Kernel launch: initWeightsKernel d_W2");
 
-    // Copy initial values to device
-    checkCudaError(cudaMemcpy(net->d_W1, net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy d_W1");
-    checkCudaError(cudaMemcpy(net->d_W2, net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy d_W2");
-    checkCudaError(cudaMemcpy(net->d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy d_b1");
-    checkCudaError(cudaMemcpy(net->d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy d_b2");
+    // Initialize biases to zero directly on the GPU.
+    checkCudaError(cudaMemset(net->d_b1, 0, HIDDEN_SIZE * sizeof(double)), "cudaMemset d_b1");
+    checkCudaError(cudaMemset(net->d_b2, 0, OUTPUT_SIZE * sizeof(double)), "cudaMemset d_b2");
+
+    // Optionally copy the initialized device values to pinned host arrays (e.g., for debugging).
+    checkCudaError(cudaMemcpy(net->W1, net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy W1");
+    checkCudaError(cudaMemcpy(net->W2, net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy W2");
+    checkCudaError(cudaMemcpy(net->b1, net->d_b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy b1");
+    checkCudaError(cudaMemcpy(net->b2, net->d_b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy b2");
 
     if (VERBOSE) {
         printf("Weight initialization complete\n");
-        printf("W1[0][0]: %.6f\n", net->W1[0]);  // First element of flattened W1
-        printf("W2[0][0]: %.6f\n", net->W2[0]);  // First element of flattened W2
+        printf("W1[0][0]: %.6f\n", net->W1[0]);
+        printf("W2[0][0]: %.6f\n", net->W2[0]);
         printf("b1[0]: %.6f\n", net->b1[0]);
         printf("b2[0]: %.6f\n", net->b2[0]);
     }
@@ -66,6 +74,8 @@ NeuralNetwork* createNetwork() {
     if (VERBOSE) printf("Neural network created successfully\n");
     return net;
 }
+
+
 
 // ReLU activation kernel
 __global__ void relu_kernel(double* x, int size) {
@@ -530,10 +540,11 @@ void freeNetwork(NeuralNetwork* net) {
     if (VERBOSE) printf("Freeing neural network...\n");
     
     // Free host memory
-    free(net->W1);
-    free(net->W2);
-    free(net->b1);
-    free(net->b2);
+    cudaFreeHost(net->W1);
+    cudaFreeHost(net->W2);
+    cudaFreeHost(net->b1);
+    cudaFreeHost(net->b2);
+
     
     // Free device memory
     checkCudaError(cudaFree(net->d_W1), "cudaFree d_W1");
