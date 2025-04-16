@@ -57,7 +57,7 @@ NeuralNetwork* createNetwork() {
     if (VERBOSE) {
         printf("Weight initialization complete\n");
         printf("W1[0][0]: %.6f\n", net->W1[0]);  // First element of flattened W1
-        printf("W2[0][0]: %.6f\n", net->W2[0]);  // First element of flattened W2
+        printf("W2[0][0]: %.6f\n", net->W2[0]);  
         printf("b1[0]: %.6f\n", net->b1[0]);
         printf("b2[0]: %.6f\n", net->b2[0]);
     }
