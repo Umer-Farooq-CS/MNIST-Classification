@@ -1,377 +1,279 @@
 #include "neural_net.h"
 #include "utils.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
-#include <openacc.h>
+#include <sys/time.h>
 
-// Initialize weights
-NeuralNetwork* createNetwork() {
-    if (VERBOSE) printf("Creating neural network...\n");
-    NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
-    if (!net) {
-        if (VERBOSE) printf("Failed to allocate neural network\n");
-        exit(1);
+// Add this new function implementation
+void initWeights(double* W, int n, double scale, unsigned long seed) {
+    srand(seed);
+    #pragma acc parallel loop present(W[0:n])
+    for (int i = 0; i < n; ++i) {
+        W[i] = scale * (2.0 * rand() / RAND_MAX - 1.0); // Random values between -scale and +scale
     }
-    
-    // Allocate memory
-    net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
-    net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
-    net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
-    net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
-
-    // Initialize weights
-    srand(time(NULL));
-    
-    #pragma acc enter data create(net[0:1], net->W1[0:HIDDEN_SIZE*INPUT_SIZE], \
-                              net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], \
-                              net->b1[0:HIDDEN_SIZE], net->b2[0:OUTPUT_SIZE])
-    
-    #pragma acc parallel loop present(net->W1[0:HIDDEN_SIZE*INPUT_SIZE])
-    for (int i = 0; i < HIDDEN_SIZE * INPUT_SIZE; i++) {
-        net->W1[i] = ((double)rand() / RAND_MAX) * 0.01;
-    }
-    
-    #pragma acc parallel loop present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE])
-    for (int i = 0; i < OUTPUT_SIZE * HIDDEN_SIZE; i++) {
-        net->W2[i] = ((double)rand() / RAND_MAX) * 0.01;
-    }
-
-    if (VERBOSE) {
-        printf("Weight initialization complete\n");
-        printf("W1[0][0]: %.6f\n", net->W1[0]);
-        printf("W2[0][0]: %.6f\n", net->W2[0]);
-        printf("b1[0]: %.6f\n", net->b1[0]);
-        printf("b2[0]: %.6f\n", net->b2[0]);
-    }
-    
-    if (VERBOSE) printf("Neural network created successfully\n");
-    return net;
 }
 
-// ReLU activation
+// Activation functions (unchanged)
+double sigmoid(double x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+double sigmoid_derivative(double x) {
+    return x * (1.0 - x);
+}
+
 void relu(double* x, int size) {
     #pragma acc parallel loop present(x[0:size])
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < size; ++i) {
         x[i] = (x[i] > 0) ? x[i] : 0;
     }
 }
 
-// Softmax activation
 void softmax(double* x, int size) {
-    double max_val = x[0];
-    
-    // Find max for numerical stability
+    double max_val = -1e30;
     #pragma acc parallel loop reduction(max:max_val) present(x[0:size])
-    for (int i = 1; i < size; i++) {
+    for (int i = 0; i < size; ++i) {
         if (x[i] > max_val) max_val = x[i];
     }
-    
+
     double sum = 0.0;
     #pragma acc parallel loop reduction(+:sum) present(x[0:size])
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < size; ++i) {
         x[i] = exp(x[i] - max_val);
         sum += x[i];
     }
-    
+
     #pragma acc parallel loop present(x[0:size])
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < size; ++i) {
         x[i] /= sum;
     }
 }
 
-// Forward pass with OpenACC
-void forward(NeuralNetwork* net, double* input, double* hidden, double* output) {
-    if (VERBOSE) printf("\nStarting forward pass...\n");
-    
-    // Copy input to device if not already there
-    #pragma acc enter data copyin(input[0:INPUT_SIZE]) \
-                     create(hidden[0:HIDDEN_SIZE], output[0:OUTPUT_SIZE])
-    
-    // Hidden layer computation
-    #pragma acc parallel loop present(net->W1[0:HIDDEN_SIZE*INPUT_SIZE], \
-                                    net->b1[0:HIDDEN_SIZE], input[0:INPUT_SIZE], \
-                                    hidden[0:HIDDEN_SIZE])
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        double sum = net->b1[i];
-        for (int j = 0; j < INPUT_SIZE; j++) {
-            sum += net->W1[i * INPUT_SIZE + j] * input[j];
+// Matrix-vector multiplication with bias addition (unchanged)
+void matrixVectorMultiply(double* W, double* x, double* b, double* y, int rows, int cols) {
+    #pragma acc parallel loop present(W[0:rows*cols], x[0:cols], b[0:rows], y[0:rows])
+    for (int i = 0; i < rows; ++i) {
+        double sum = 0.0;
+        for (int j = 0; j < cols; ++j) {
+            sum += W[i * cols + j] * x[j];
         }
-        hidden[i] = sum;
+        y[i] = sum + b[i];
     }
-    
-    // Apply ReLU
+}
+
+// Forward propagation through the network
+void forwardPass(NeuralNetwork* net, double* input, double* hidden, double* output) {
+    matrixVectorMultiply(net->W1, input, net->b1, hidden, HIDDEN_SIZE, INPUT_SIZE);
     relu(hidden, HIDDEN_SIZE);
-    
-    // Output layer computation
-    #pragma acc parallel loop present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], \
-                                    net->b2[0:OUTPUT_SIZE], hidden[0:HIDDEN_SIZE], \
-                                    output[0:OUTPUT_SIZE])
-    for (int i = 0; i < OUTPUT_SIZE; i++) {
-        double sum = net->b2[i];
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            sum += net->W2[i * HIDDEN_SIZE + j] * hidden[j];
-        }
-        output[i] = sum;
-    }
-    
-    // Apply softmax
+    matrixVectorMultiply(net->W2, hidden, net->b2, output, OUTPUT_SIZE, HIDDEN_SIZE);
     softmax(output, OUTPUT_SIZE);
-    
-    // Ensure results are on host
-    #pragma acc update self(hidden[0:HIDDEN_SIZE], output[0:OUTPUT_SIZE])
-    
-    if (VERBOSE) {
-        printf("Post-ReLU hidden (first 5): ");
-        for (int i = 0; i < 5; i++) printf("%.4f ", hidden[i]);
-        printf("\n");
-        printf("Post-softmax output: ");
-        for (int i = 0; i < OUTPUT_SIZE; i++) printf("%.4f ", output[i]);
-        printf("\n");
-        printf("Forward pass completed\n");
-    }
-    
-    // Clean up temporary device data
-    #pragma acc exit data delete(input[0:INPUT_SIZE])
 }
 
-// Backward pass with OpenACC
+// Backward propagation (with OpenACC support)
 void backward(NeuralNetwork* net, double* input, double* hidden, double* output, double* target) {
-    if (VERBOSE) printf("\nStarting backward pass...\n");
-    
-    double d_output[OUTPUT_SIZE], d_hidden[HIDDEN_SIZE];
-    
-    // Copy target to device
-    #pragma acc enter data copyin(target[0:OUTPUT_SIZE]) \
-                     create(d_output[0:OUTPUT_SIZE], d_hidden[0:HIDDEN_SIZE])
-    
-    // Compute output layer gradient
-    #pragma acc parallel loop present(output[0:OUTPUT_SIZE], target[0:OUTPUT_SIZE], \
-                                    d_output[0:OUTPUT_SIZE])
-    for (int i = 0; i < OUTPUT_SIZE; i++) {
-        d_output[i] = output[i] - target[i];
+    double output_error[OUTPUT_SIZE];
+    double hidden_error[HIDDEN_SIZE];
+
+    // Compute output layer error
+    #pragma acc parallel loop present(output[0:OUTPUT_SIZE], target[0:OUTPUT_SIZE], output_error[0:OUTPUT_SIZE])
+    for (int i = 0; i < OUTPUT_SIZE; ++i) {
+        output_error[i] = output[i] - target[i];  // Cross-entropy derivative
     }
-    
-    // Compute hidden layer gradient
-    #pragma acc parallel loop present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], \
-                                    d_output[0:OUTPUT_SIZE], hidden[0:HIDDEN_SIZE], \
-                                    d_hidden[0:HIDDEN_SIZE])
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        double sum = 0;
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            sum += net->W2[j * HIDDEN_SIZE + i] * d_output[j];
+
+    // Compute hidden layer error
+    #pragma acc parallel loop present(output_error[0:OUTPUT_SIZE], net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], hidden_error[0:HIDDEN_SIZE])
+    for (int i = 0; i < HIDDEN_SIZE; ++i) {
+        hidden_error[i] = 0.0;
+        for (int j = 0; j < OUTPUT_SIZE; ++j) {
+            hidden_error[i] += output_error[j] * net->W2[j * HIDDEN_SIZE + i];
         }
-        d_hidden[i] = sum * (hidden[i] > 0);
+        // Apply the ReLU derivative
+        hidden_error[i] *= (hidden[i] > 0) ? 1.0 : 0.0;
     }
-    
-    // Update weights (gradient descent)
-    #pragma acc parallel loop present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], \
-                                    d_output[0:OUTPUT_SIZE], hidden[0:HIDDEN_SIZE])
-    for (int i = 0; i < OUTPUT_SIZE; i++) {
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            net->W2[i * HIDDEN_SIZE + j] -= LEARNING_RATE * d_output[i] * hidden[j];
+
+    // Update weights and biases for W2 and b2
+    #pragma acc parallel loop present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], hidden[0:HIDDEN_SIZE], output_error[0:OUTPUT_SIZE])
+    for (int i = 0; i < OUTPUT_SIZE; ++i) {
+        for (int j = 0; j < HIDDEN_SIZE; ++j) {
+            net->W2[i * HIDDEN_SIZE + j] -= LEARNING_RATE * output_error[i] * hidden[j];
         }
+        net->b2[i] -= LEARNING_RATE * output_error[i];
     }
-    
-    #pragma acc parallel loop present(net->W1[0:HIDDEN_SIZE*INPUT_SIZE], \
-                                    d_hidden[0:HIDDEN_SIZE], input[0:INPUT_SIZE])
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        for (int j = 0; j < INPUT_SIZE; j++) {
-            net->W1[i * INPUT_SIZE + j] -= LEARNING_RATE * d_hidden[i] * input[j];
+
+    // Update weights and biases for W1 and b1
+    #pragma acc parallel loop present(net->W1[0:HIDDEN_SIZE*INPUT_SIZE], input[0:INPUT_SIZE], hidden_error[0:HIDDEN_SIZE])
+    for (int i = 0; i < HIDDEN_SIZE; ++i) {
+        for (int j = 0; j < INPUT_SIZE; ++j) {
+            net->W1[i * INPUT_SIZE + j] -= LEARNING_RATE * hidden_error[i] * input[j];
         }
+        net->b1[i] -= LEARNING_RATE * hidden_error[i];
     }
-    
-    // Update biases
-    #pragma acc parallel loop present(net->b2[0:OUTPUT_SIZE], d_output[0:OUTPUT_SIZE])
-    for (int i = 0; i < OUTPUT_SIZE; i++) {
-        net->b2[i] -= LEARNING_RATE * d_output[i];
-    }
-    
-    #pragma acc parallel loop present(net->b1[0:HIDDEN_SIZE], d_hidden[0:HIDDEN_SIZE])
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        net->b1[i] -= LEARNING_RATE * d_hidden[i];
-    }
-    
-    if (VERBOSE) {
-        printf("Updated W2[0][0]: %.6f\n", net->W2[0]);
-        printf("Updated W1[0][0]: %.6f\n", net->W1[0]);
-        printf("Updated b2[0]: %.6f\n", net->b2[0]);
-        printf("Updated b1[0]: %.6f\n", net->b1[0]);
-        printf("Backward pass completed\n");
-    }
-    
-    // Clean up temporary device data
-    #pragma acc exit data delete(target[0:OUTPUT_SIZE], d_output[0:OUTPUT_SIZE], \
-                               d_hidden[0:HIDDEN_SIZE])
 }
 
-// Training function
+// Training the network (with OpenACC support)
 void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
-    if (VERBOSE) printf("\nStarting training...\n");
+    double input[INPUT_SIZE];
+    double hidden[HIDDEN_SIZE];
+    double output[OUTPUT_SIZE];
     
-    // Copy all data to device at once
-    #pragma acc enter data copyin(images[0:numImages*INPUT_SIZE], \
-                                labels[0:numImages*OUTPUT_SIZE])
+    struct timeval start, end;
+    double total_time = 0;
     
-    for (int epoch = 0; epoch < EPOCHS; epoch++) {
-        double loss = 0.0;
-        int correct = 0;
+    #pragma acc data copyin(images[0:numImages*INPUT_SIZE], labels[0:numImages*OUTPUT_SIZE])
+    {
+        for (int epoch = 0; epoch < EPOCHS; ++epoch) {
+            gettimeofday(&start, NULL);
+            
+            int correct = 0;
+            double total_loss = 0.0;
+            
+            #pragma acc parallel loop reduction(+:correct, total_loss)
+            for (int i = 0; i < numImages; ++i) {
+                // Copy the image to input layer
+                #pragma acc loop
+                for (int j = 0; j < INPUT_SIZE; ++j) {
+                    input[j] = images[i * INPUT_SIZE + j];
+                }
 
-        if (VERBOSE) printf("\nEpoch %d/%d\n", epoch+1, EPOCHS);
-        
-        #pragma acc parallel loop reduction(+:loss, correct) \
-                     present(images[0:numImages*INPUT_SIZE], labels[0:numImages*OUTPUT_SIZE])
-        for (int i = 0; i < numImages; i++) {
-            double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-            
-            // Forward pass for this sample
-            #pragma acc loop seq
-            for (int j = 0; j < HIDDEN_SIZE; j++) {
-                double sum = net->b1[j];
-                for (int k = 0; k < INPUT_SIZE; k++) {
-                    sum += net->W1[j * INPUT_SIZE + k] * images[i * INPUT_SIZE + k];
+                // Forward pass
+                forwardPass(net, input, hidden, output);
+                
+                // Calculate loss (cross-entropy)
+                double loss = 0.0;
+                #pragma acc loop reduction(+:loss)
+                for (int j = 0; j < OUTPUT_SIZE; ++j) {
+                    if (labels[i * OUTPUT_SIZE + j] == 1.0) {
+                        loss += -log(output[j] + 1e-10);  // Small epsilon to avoid log(0)
+                    }
                 }
-                hidden[j] = (sum > 0) ? sum : 0;  // ReLU
-            }
-            
-            #pragma acc loop seq
-            for (int j = 0; j < OUTPUT_SIZE; j++) {
-                double sum = net->b2[j];
-                for (int k = 0; k < HIDDEN_SIZE; k++) {
-                    sum += net->W2[j * HIDDEN_SIZE + k] * hidden[k];
+                total_loss += loss;
+                
+                // Check prediction
+                int pred = 0;
+                double max_val = output[0];
+                #pragma acc loop reduction(max:max_val)
+                for (int j = 1; j < OUTPUT_SIZE; ++j) {
+                    if (output[j] > max_val) {
+                        max_val = output[j];
+                        pred = j;
+                    }
                 }
-                output[j] = sum;
+                
+                // Check target
+                int target = 0;
+                #pragma acc loop
+                for (int j = 0; j < OUTPUT_SIZE; ++j) {
+                    if (labels[i * OUTPUT_SIZE + j] == 1.0) {
+                        target = j;
+                    }
+                }
+                
+                if (pred == target) correct++;
+                
+                // Backward pass
+                backward(net, input, hidden, output, &labels[i * OUTPUT_SIZE]);
             }
             
-            // Softmax
-            double max_val = output[0];
-            #pragma acc loop reduction(max:max_val)
-            for (int j = 1; j < OUTPUT_SIZE; j++) {
-                if (output[j] > max_val) max_val = output[j];
-            }
+            gettimeofday(&end, NULL);
+            double epoch_time = (end.tv_sec - start.tv_sec) + 
+                               (end.tv_usec - start.tv_usec) / 1000000.0;
+            total_time += epoch_time;
             
-            double sum_exp = 0.0;
-            #pragma acc loop reduction(+:sum_exp)
-            for (int j = 0; j < OUTPUT_SIZE; j++) {
-                output[j] = exp(output[j] - max_val);
-                sum_exp += output[j];
-            }
+            double avg_loss = total_loss / numImages;
+            double accuracy = (double)correct / numImages * 100.0;
             
-            #pragma acc loop
-            for (int j = 0; j < OUTPUT_SIZE; j++) {
-                output[j] /= sum_exp;
-            }
-            
-            // Compute loss & accuracy
-            #pragma acc loop reduction(+:loss)
-            for (int k = 0; k < OUTPUT_SIZE; k++) {
-                loss -= labels[i * OUTPUT_SIZE + k] * log(output[k]);
-            }
-            
-            int pred = 0, actual = 0;
-            #pragma acc loop seq
-            for (int j = 0; j < OUTPUT_SIZE; j++) {
-                if (output[j] > output[pred]) pred = j;
-                if (labels[i * OUTPUT_SIZE + j] > labels[i * OUTPUT_SIZE + actual]) actual = j;
-            }
-            if (pred == actual) correct++;
+            printf("Epoch %d - Loss: %.4f - Train Accuracy: %.2f%% - Time: %.3fs\n",
+                   epoch + 1, avg_loss, accuracy, epoch_time);
         }
-
-        printf("Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
-               epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
     }
     
-    // Clean up data from device
-    #pragma acc exit data delete(images[0:numImages*INPUT_SIZE], \
-                               labels[0:numImages*OUTPUT_SIZE])
-    
-    if (VERBOSE) printf("Training completed\n");
+    printf("Total training time: %.3fs\n", total_time);
 }
 
-// Evaluation function
-void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
-    if (VERBOSE) printf("\nStarting evaluation...\n");
-    int correct = 0;
-    
-    // Copy data to device
-    #pragma acc enter data copyin(images[0:numImages*INPUT_SIZE], \
-                                labels[0:numImages*OUTPUT_SIZE])
-    
-    #pragma acc parallel loop reduction(+:correct) \
-                 present(images[0:numImages*INPUT_SIZE], labels[0:numImages*OUTPUT_SIZE])
-    for (int i = 0; i < numImages; i++) {
-        double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-        
-        // Forward pass
-        #pragma acc loop seq
-        for (int j = 0; j < HIDDEN_SIZE; j++) {
-            double sum = net->b1[j];
-            for (int k = 0; k < INPUT_SIZE; k++) {
-                sum += net->W1[j * INPUT_SIZE + k] * images[i * INPUT_SIZE + k];
-            }
-            hidden[j] = (sum > 0) ? sum : 0;  // ReLU
-        }
-        
-        #pragma acc loop seq
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            double sum = net->b2[j];
-            for (int k = 0; k < HIDDEN_SIZE; k++) {
-                sum += net->W2[j * HIDDEN_SIZE + k] * hidden[k];
-            }
-            output[j] = sum;
-        }
-        
-        // Softmax
-        double max_val = output[0];
-        #pragma acc loop reduction(max:max_val)
-        for (int j = 1; j < OUTPUT_SIZE; j++) {
-            if (output[j] > max_val) max_val = output[j];
-        }
-        
-        double sum_exp = 0.0;
-        #pragma acc loop reduction(+:sum_exp)
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            output[j] = exp(output[j] - max_val);
-            sum_exp += output[j];
-        }
-        
-        #pragma acc loop
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            output[j] /= sum_exp;
-        }
-        
-        // Compute accuracy
-        int pred = 0, actual = 0;
-        #pragma acc loop seq
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            if (output[j] > output[pred]) pred = j;
-            if (labels[i * OUTPUT_SIZE + j] > labels[i * OUTPUT_SIZE + actual]) actual = j;
-        }
-        if (pred == actual) correct++;
-    }
-    
-    printf("Test Accuracy: %.2f%%\n", (correct / (double)numImages) * 100);
-    
-    // Clean up data from device
-    #pragma acc exit data delete(images[0:numImages*INPUT_SIZE], \
-                               labels[0:numImages*OUTPUT_SIZE])
-    
-    if (VERBOSE) printf("Evaluation completed\n");
+void initNetwork(NeuralNetwork* net) {
+    unsigned long seed = time(NULL);
+    net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
+    net->b1 = allocateMatrix(HIDDEN_SIZE, 1);
+    net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
+    net->b2 = allocateMatrix(OUTPUT_SIZE, 1);
+
+    initWeights(net->W1, HIDDEN_SIZE * INPUT_SIZE, 0.1, seed);
+    initWeights(net->b1, HIDDEN_SIZE, 0.1, seed + 1);
+    initWeights(net->W2, OUTPUT_SIZE * HIDDEN_SIZE, 0.1, seed + 2);
+    initWeights(net->b2, OUTPUT_SIZE, 0.1, seed + 3);
 }
 
 void freeNetwork(NeuralNetwork* net) {
-    if (VERBOSE) printf("Freeing neural network...\n");
+    freeMatrix(net->W1, HIDDEN_SIZE, INPUT_SIZE);
+    freeMatrix(net->b1, HIDDEN_SIZE, 1);
+    freeMatrix(net->W2, OUTPUT_SIZE, HIDDEN_SIZE);
+    freeMatrix(net->b2, OUTPUT_SIZE, 1);
+}
+
+void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
+    int correct = 0;
+    double input[INPUT_SIZE];
+    double hidden[HIDDEN_SIZE];
+    double output[OUTPUT_SIZE];
+    double total_loss = 0.0;
     
-    // Remove data from device
-    #pragma acc exit data delete(net->W1[0:HIDDEN_SIZE*INPUT_SIZE], \
-                               net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], \
-                               net->b1[0:HIDDEN_SIZE], net->b2[0:OUTPUT_SIZE], \
-                               net[0:1])
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
     
-    // Free host memory
-    free(net->W1);
-    free(net->W2);
-    free(net->b1);
-    free(net->b2);
-    free(net);
+    #pragma acc data copyin(images[0:numImages*INPUT_SIZE], labels[0:numImages*OUTPUT_SIZE])
+    {
+        #pragma acc parallel loop reduction(+:correct, total_loss)
+        for (int i = 0; i < numImages; ++i) {
+            #pragma acc loop
+            for (int j = 0; j < INPUT_SIZE; ++j) {
+                input[j] = images[i * INPUT_SIZE + j];
+            }
+
+            forwardPass(net, input, hidden, output);
+            
+            // Calculate loss
+            double loss = 0.0;
+            #pragma acc loop reduction(+:loss)
+            for (int j = 0; j < OUTPUT_SIZE; ++j) {
+                if (labels[i * OUTPUT_SIZE + j] == 1.0) {
+                    loss += -log(output[j] + 1e-10);
+                }
+            }
+            total_loss += loss;
+            
+            // Check prediction
+            int pred = 0;
+            double max_val = output[0];
+            #pragma acc loop reduction(max:max_val)
+            for (int j = 1; j < OUTPUT_SIZE; ++j) {
+                if (output[j] > max_val) {
+                    max_val = output[j];
+                    pred = j;
+                }
+            }
+            
+            // Check target
+            int target = 0;
+            #pragma acc loop
+            for (int j = 0; j < OUTPUT_SIZE; ++j) {
+                if (labels[i * OUTPUT_SIZE + j] == 1.0) {
+                    target = j;
+                }
+            }
+            
+            if (pred == target) correct++;
+        }
+    }
     
-    if (VERBOSE) printf("Neural network freed\n");
+    gettimeofday(&end, NULL);
+    double eval_time = (end.tv_sec - start.tv_sec) + 
+                      (end.tv_usec - start.tv_usec) / 1000000.0;
+    
+    double avg_loss = total_loss / numImages;
+    double accuracy = (double)correct / numImages * 100.0;
+    
+    printf("\nTest Loss: %.4f\n", avg_loss);
+    printf("Test Accuracy: %.2f%%\n", accuracy);
+    printf("Evaluation time: %.3fs\n", eval_time);
 }

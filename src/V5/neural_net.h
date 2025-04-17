@@ -1,26 +1,26 @@
 #ifndef NEURAL_NET_H
 #define NEURAL_NET_H
 
-#include "nn.h"
-#include <stdlib.h>
-#include <time.h>
-#include <openacc.h>  // Add OpenACC header
+#include "nn.h"  // Include nn.h first to get all constants
 
-// Remove CUDA-specific kernel declarations
-// Keep the NeuralNetwork structure but remove device pointers
 typedef struct {
-    double* W1;  // Flattened weight matrix for layer 1 [HIDDEN_SIZE x INPUT_SIZE]
-    double* W2;  // Flattened weight matrix for layer 2 [OUTPUT_SIZE x HIDDEN_SIZE]
-    double* b1;  // Biases for layer 1 [HIDDEN_SIZE]
-    double* b2;  // Biases for layer 2 [OUTPUT_SIZE]
+    double *W1, *b1, *W2, *b2;
 } NeuralNetwork;
 
-// Neural network functions
-NeuralNetwork* createNetwork();
-void freeNetwork(NeuralNetwork* net);
-void forward(NeuralNetwork* net, double* input, double* hidden, double* output);
+// Activation functions
+double sigmoid(double x);
+double sigmoid_derivative(double x);
+void relu(double* x, int size);
+void softmax(double* x, int size);
+
+// Neural network operations
+void initWeights(double* W, int n, double scale, unsigned long seed);
+void matrixVectorMultiply(double* W, double* x, double* b, double* y, int rows, int cols);
+void forwardPass(NeuralNetwork* net, double* input, double* hidden, double* output);
 void backward(NeuralNetwork* net, double* input, double* hidden, double* output, double* target);
 void train(NeuralNetwork* net, double* images, double* labels, int numImages);
 void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages);
+void initNetwork(NeuralNetwork* net);
+void freeNetwork(NeuralNetwork* net);
 
 #endif
