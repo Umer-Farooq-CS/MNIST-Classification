@@ -3,28 +3,32 @@ CC = gcc
 CFLAGS = -O3 -fopenacc -march=native -ffast-math -Wall -Wextra
 LDFLAGS = -lm -fopenacc
 
-# Source files
+# Source files and output folders
 SRCS = main.c neural_net.c mnist.c utils.c
-OBJS = $(SRCS:.c=.o)
-EXEC = mnist_nn
+OBJS = $(patsubst %.c, build/%.o, $(SRCS))
+EXEC = build/mnist_nn
 
-# Default build target
-all: $(EXEC)
+# Default target
+all: build $(EXEC)
 
-# Link object files into executable
+# Create build directory if not exists
+build:
+	mkdir -p build
+
+# Link object files into the executable
 $(EXEC): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-# Compile .c files into .o files
-%.o: %.c
+# Compile source files into object files in the build folder
+build/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Run the program after building
+# Run the program
 run: all
 	./$(EXEC)
 
 # Clean up build files
 clean:
-	rm -f $(OBJS) $(EXEC)
+	rm -rf build
 
-.PHONY: all clean run
+.PHONY: all clean run build
