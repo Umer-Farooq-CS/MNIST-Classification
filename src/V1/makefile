@@ -1,31 +1,60 @@
+# Compiler and flags
 CC = gcc
 CFLAGS = -Wall -O2 -pg -Isrc
-EXE = build/nn.exe
-SRC = main.c neural_net.c utils.c mnist.c
-OBJ = $(patsubst %.c,build/%.o,$(SRC))
-GMON_OUT = build/gmon.out
+LDFLAGS = -lm
 
+# Paths and filenames
+SRC_DIR = .
+BUILD_DIR = build
+PROF_DIR = $(BUILD_DIR)/prof
+EXE = $(BUILD_DIR)/nn.exe
+GMON_OUT = $(BUILD_DIR)/gmon.out
+TIME_FILE = $(BUILD_DIR)/training_time.txt
+OUTPUT_FILE = $(BUILD_DIR)/full_output.txt
+SRC = main.c neural_net.c utils.c mnist.c
+OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRC))
+
+# Default target
 all: $(EXE) run
 
-$(EXE): build $(OBJ)
-	$(CC) $(CFLAGS) -o $(EXE) $(OBJ) -lm
+# Ensure build directories exist
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR) $(PROF_DIR)
 
-build:
-	mkdir -p build
-
-build/%.o: %.c | build
+# Compile source files into object files
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-run: $(EXE)
-	./$(EXE)
-	mv gmon.out $(GMON_OUT) 2>/dev/null || true
+# Link the object files into the executable
+$(EXE): $(OBJ)
+	$(CC) $(CFLAGS) -o $(EXE) $(OBJ) $(LDFLAGS)
 
-clean:
-	rm -rf build prof_analysis
+# Run the program, save time to file
+run: $(EXE)
+	@echo "Running neural network..."
+	@./$(EXE) | tee $(OUTPUT_FILE)
+	@grep "Total training time" $(OUTPUT_FILE) | tee $(TIME_FILE)
+	@mv gmon.out $(GMON_OUT) 2>/dev/null || true
+
+
+# Profiling and moving the gmon output
+prof-run: $(EXE)
+	@echo "Running with profiling..."
+	@./$(EXE)
+	@mv gmon.out $(GMON_OUT) 2>/dev/null || true
 
 # Profiling with gprof and visualization
-prof: run
-	mkdir -p prof_analysis
-	gprof $(EXE) $(GMON_OUT) > prof_analysis/gprof_analysis.txt
-	gprof $(EXE) $(GMON_OUT) -q | gprof2dot -n 0 -e 0 | dot -Tpng -o prof_analysis/gprof_graph.png 2>/dev/null
-	@echo "Profiling analysis saved in prof_analysis/gprof_analysis.txt and call graph saved in prof_analysis/gprof_graph.png"
+prof: prof-run
+	@echo "Generating profiling report..."
+	@mkdir -p $(PROF_DIR)
+	@gprof $(EXE) $(GMON_OUT) > $(PROF_DIR)/gprof_analysis.txt
+	@gprof $(EXE) $(GMON_OUT) -q | gprof2dot -n 0 -e 0 | dot -Tpng -o $(PROF_DIR)/gprof_graph.png 2>/dev/null
+	@echo "Profiling results saved to:"
+	@echo "  - $(PROF_DIR)/gprof_analysis.txt"
+	@echo "  - $(PROF_DIR)/gprof_graph.png"
+
+# Clean build and profiling artifacts
+clean:
+	rm -rf $(BUILD_DIR)
+
+.PHONY: all clean run prof prof-run
