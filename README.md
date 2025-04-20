@@ -10,6 +10,7 @@ This project focuses on accelerating a neural network implementation for the MNI
 │   ├── V2  # Naive GPU implementation
 │   ├── V3  # Optimized GPU implementation with performance improvements
 │   ├── V4  # Optimized GPU implementation utilizing tensor cores
+│   ├── V5  # Optimized GPU implementation using OpenACC
 ├── data    # Contains the MNIST dataset
 ├── report  # Project report
 ├── slides  # Presentation slides
