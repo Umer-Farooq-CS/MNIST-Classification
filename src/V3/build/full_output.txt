@@ -1,0 +1,10 @@
+
+MNIST Neural Network
+
+Epoch 1 - Loss: 0.2691 - Train Accuracy: 91.84% - Time: 4.079s
+Epoch 2 - Loss: 0.1085 - Train Accuracy: 96.78% - Time: 4.208s
+Epoch 3 - Loss: 0.0758 - Train Accuracy: 97.72% - Time: 4.399s
+Total training time: 12.685s
+Test Accuracy: 97.02%
+Program completed successfully
+

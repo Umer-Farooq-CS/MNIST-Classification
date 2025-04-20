@@ -14,6 +14,10 @@ OUTPUT_FILE = $(BUILD_DIR)/full_output.txt
 SRC = main.c neural_net.c utils.c mnist.c
 OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRC))
 
+# Speedup analysis
+SPEEDUP_SRC = speedup_analysis.c
+SPEEDUP_EXE = $(BUILD_DIR)/speedup_analysis
+
 # Default target
 all: $(EXE) run
 
@@ -36,7 +40,6 @@ run: $(EXE)
 	@grep "Total training time" $(OUTPUT_FILE) | tee $(TIME_FILE)
 	@mv gmon.out $(GMON_OUT) 2>/dev/null || true
 
-
 # Profiling and moving the gmon output
 prof-run: $(EXE)
 	@echo "Running with profiling..."
@@ -53,8 +56,17 @@ prof: prof-run
 	@echo "  - $(PROF_DIR)/gprof_analysis.txt"
 	@echo "  - $(PROF_DIR)/gprof_graph.png"
 
+# Compile and run speedup analysis
+$(SPEEDUP_EXE): $(SPEEDUP_SRC) | $(BUILD_DIR)
+	$(CC) -o $(SPEEDUP_EXE) $(SPEEDUP_SRC)
+
+# Target for speedup analysis
+speedup: $(SPEEDUP_EXE)
+	@echo "Running speedup analysis..."
+	@./$(SPEEDUP_EXE)
+
 # Clean build and profiling artifacts
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(PROF_DIR) $(GMON_OUT) $(TIME_FILE) $(OUTPUT_FILE)
 
-.PHONY: all clean run prof prof-run
+.PHONY: all clean run prof prof-run speedup
