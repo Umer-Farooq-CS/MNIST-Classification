@@ -37,10 +37,12 @@ make run
 ```
 This will execute the compiled neural network and move profiling data if available.
 
-### Profiling Execution
+### Profiling and Speedup Execution
 To run the profiling version:
 ```sh
 make prof-run
+make nsight-analyze
+make speedup
 ```
 This generates profiling data for performance analysis.
 
@@ -57,7 +59,8 @@ make clean
 - **`mnist.cu`**: MNIST dataset handling functions.
 - **`nn.h`**: Header file defining neural network parameters.
 - **`utils.h`**: Header file defining helper functions for matrix operations and timing.
-
+- **`speedup_analysis.c`**: Compares all versions and gives speedup analysis.
+  
 ## Optimization Strategy
 Each version of the project applies different optimization techniques:
 
@@ -74,6 +77,12 @@ Each version of the project applies different optimization techniques:
 - Improved occupancy and memory usage.
 - Reduced communication overhead.
 - Efficient memory hierarchy utilization.
+- Utilized Cuda Streams
+- Utilized Pinned Memory
+- Initialization shifted to kernel side
+- Combined multiple small kernels
+- Utilized Shared Memory
+- Used Optimized Compiler Flags
 
 ### **V4 (Tensor Core Optimization)**
 - Utilizes Tensor Cores for matrix multiplications.
