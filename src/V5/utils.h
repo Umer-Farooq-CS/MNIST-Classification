@@ -11,6 +11,6 @@
     }
 
 double* allocateMatrix(int rows, int cols);
-void freeMatrix(double* mat, int rows, int cols);  // Fixed to match implementation
+void freeMatrix(double* mat, int rows, int cols);
     
 #endif

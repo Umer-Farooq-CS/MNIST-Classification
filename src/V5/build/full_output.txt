@@ -1,0 +1,13 @@
+
+MNIST Neural Network with OpenACC
+
+Epoch 1 - Loss: 0.2195 - Train Accuracy: 93.50% - Time: 1.164s
+Epoch 2 - Loss: 0.0976 - Train Accuracy: 97.09% - Time: 1.171s
+Epoch 3 - Loss: 0.0674 - Train Accuracy: 98.02% - Time: 1.159s
+Total training time: 3.495s
+
+Test Loss: 0.1033
+Test Accuracy: 96.93%
+Evaluation time: 0.090s
+Program completed successfully
+

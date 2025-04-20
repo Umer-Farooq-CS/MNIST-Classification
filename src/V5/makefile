@@ -10,12 +10,17 @@ PROF_DIR = $(BUILD_DIR)/prof
 TIME_FILE = $(BUILD_DIR)/training_time.txt
 EXEC = $(BUILD_DIR)/mnist_nn
 PROF_EXEC = $(BUILD_DIR)/mnist_nn_prof
-SRCS = $(wildcard $(SRC_DIR)/*.c)
+SRCS = $(filter-out $(SRC_DIR)/speedup_analysis.c, $(wildcard $(SRC_DIR)/*.c))
 OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 PROF_OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.prof.o, $(SRCS))
 GMON_OUT = $(BUILD_DIR)/gmon.out
 NVPROF_LOG = $(BUILD_DIR)/nvprof_log.txt
 OUTPUT_FILE = $(BUILD_DIR)/full_output.txt
+
+# Speedup analysis
+SPEEDUP_CC = gcc
+SPEEDUP_SRC = speedup_analysis.c
+SPEEDUP_EXE = build/speedup_analysis
 
 # Default target
 all: $(EXEC)
@@ -63,18 +68,10 @@ prof: prof-run
 	@echo "  - $(PROF_DIR)/gprof_analysis.txt"
 	@echo "  - $(PROF_DIR)/gprof_graph.png"
 
-# Run GPU profiling with nvprof (without OpenACC profiling flags)
+# Run GPU profiling with nvprof
 gpu-prof-run: $(EXEC)
 	@echo "Running GPU profiling with nvprof..."
-	@nvprof --output-profile $(NVPROF_LOG) ./$(EXEC)
+	@nvprof --metrics achieved_occupancy,sm_efficiency --print-gpu-trace --output-profile $(NVPROF_LOG) ./$(EXEC)
 
 # Generate GPU profiling report
-gpu-prof: gpu-prof-run
-	@echo "GPU Profiling results saved to $(NVPROF_LOG)"
-	@echo "You can analyze the results with nvprof or visualize it with nvvp."
-
-# Clean build artifacts
-clean:
-	rm -rf $(BUILD_DIR)
-
-.PHONY: all clean run prof prof-run gpu-prof gpu-prof-run
+gpu-prof: gpu
