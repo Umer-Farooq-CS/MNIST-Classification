@@ -96,8 +96,9 @@ Each version of the project applies different optimization techniques:
 
 ## Authors
 - **Umer Farooq**
-
+- **Muhammad Irtaza Khan**
+  
 ## Github Repository
 https://github.com/Umer-Farooq-CS/MNIST-Classification.git
-- **Muhammad Irtaza Khan**
+
 
