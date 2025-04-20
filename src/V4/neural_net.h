@@ -11,24 +11,29 @@
 
 // Structure holding host and device copies of weights and biases
 typedef struct {
-    // Master weights (FP32)
-    float* W1;  // Flattened weight matrix for layer 1 [HIDDEN_SIZE x INPUT_SIZE]
-    float* W2;  // Flattened weight matrix for layer 2 [OUTPUT_SIZE x HIDDEN_SIZE]
-    float* b1;  // Biases for layer 1 [HIDDEN_SIZE]
-    float* b2;  // Biases for layer 2 [OUTPUT_SIZE]
-    
-    // Device (GPU) copies (FP16 for computation, FP32 for storage)
-    float* d_W1;
-    float* d_W2;
+    // Host-side weights and biases (original float32 or float16)
+    half* W1;    // Host weights FP16
+    half* W2;
+    float* b1;   // Host biases FP32
+    float* b2;
+
+    // Device-side weights and biases (FP32 for CPU-trained versions)
+    half* d_W1;  // FP16
+    half* d_W2;
     float* d_b1;
     float* d_b2;
-    half* d_W1_half;   // FP16 copy for Tensor Core ops
-    half* d_W2_half;   // FP16 copy for Tensor Core ops
-    half* d_b1_half;   // FP16 copy for Tensor Core ops
-    half* d_b2_half;   // FP16 copy for Tensor Core ops
-    half* d_input;
-    half* d_hidden;
-    half* d_output;
+
+    // Tensor Core-optimized copies (required in many kernels)
+    half* d_W1_half;
+    half* d_W2_half;
+    half* d_b1_half;
+    half* d_b2_half;
+
+    // Input/output buffers
+    half* d_input;       // FP16 input batch
+    float* d_hidden;     // FP32 hidden layer
+    float* d_output;     // FP32 output layer
+
 } NeuralNetwork;
 
 // Neural network functions
