@@ -89,6 +89,11 @@ Each version of the project applies different optimization techniques:
 - Utilizes Tensor Cores for matrix multiplications.
 - Further speedup through specialized CUDA libraries.
 
+  
+### **V5: (OpenACC Implementation)**
+- Directive-based parallelism.
+- Quick porting, hardware abstraction.
+
 ## Authors
 - **Umer Farooq**
 - **Muhammad Irtaza Khan**
